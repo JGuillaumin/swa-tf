@@ -1,14 +1,11 @@
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import init_ops
-from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.training import slot_creator
-from tensorflow.python.util.tf_export import tf_export
 
 
 class StochasticWeightAveraging(object):
@@ -62,8 +59,9 @@ class StochasticWeightAveraging(object):
             updates = []
             for var in var_list:
                 updates.append(assign_stochastic_average(self._averages[var], var, self._n_models))
-            updates.append(state_ops.assign_add(self._n_models, 1))
-            return control_flow_ops.group(*updates, name=scope)
+            with ops.control_dependencies(updates):
+                update_n_models = state_ops.assign_add(self._n_models, 1., name=scope)
+            return update_n_models
 
     @property
     def name(self):

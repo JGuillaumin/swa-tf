@@ -8,11 +8,12 @@ from tensorflow.python.keras.datasets.cifar10 import load_data as load_cifar10
 from tqdm import tqdm
 import argparse
 import sys
-import time
-from pprint import  pprint
+
 
 from stochastic_weight_averaging import StochasticWeightAveraging
 from resnet_model import Model
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 MAIN_LOG_DIR = 'logs/'
 INTERPOLATION = "BILINEAR"
@@ -29,42 +30,39 @@ RESNET_SIZE = 32
 BOTTLENECK = False
 RESNET_VERSION = 2
 
+COLORS = {
+    'green': ['\033[32m', '\033[39m'],
+    'red': ['\033[31m', '\033[39m']
+}
 
-def get_best_model(model_dir, mode=None):
+
+def get_best_model(model_dir, model='best_model'):
     model_to_restore = None
-    if mode is None:
-        list_best_model_index = glob(os.path.join(model_dir, 'best_model.ckpt-*.index'))
-    elif mode == "swa":
-        list_best_model_index = glob(os.path.join(model_dir, 'best_model_swa.ckpt-*.index'))
-    else:
-        raise ValueError("Invalid mode on 'get_best_model' : {}".format(mode))
-
+    list_best_model_index = glob(os.path.join(model_dir, '{}.ckpt-*.index'.format(model)))
     if len(list_best_model_index) > 0:
         model_to_restore = list_best_model_index[0].split('.index')[0]
     return model_to_restore
 
 
-def build_model(inputs, is_training_bn=True, getter=None):
+def build_model(inputs, is_training_bn=True):
 
     num_blocks = (RESNET_SIZE - 2) // 6
 
-    with tf.variable_scope('MODEL', custom_getter=getter, reuse=tf.AUTO_REUSE):
-        model = Model(resnet_size=RESNET_SIZE,
-                      bottleneck=BOTTLENECK,
-                      num_classes=10,
-                      num_filters=16,
-                      kernel_size=3,
-                      conv_stride=1,
-                      first_pool_size=None,
-                      first_pool_stride=None,
-                      block_sizes=[num_blocks, ]*3,
-                      block_strides=[1, 2, 3],
-                      final_size=64,
-                      resnet_version=RESNET_VERSION,
-                      data_format=DATA_FORMAT,
-                      dtype=tf.float32)
-
-        logits = model(inputs, training=is_training_bn)
+    model = Model(resnet_size=RESNET_SIZE,
+                  bottleneck=BOTTLENECK,
+                  num_classes=10,
+                  num_filters=16,
+                  kernel_size=3,
+                  conv_stride=1,
+                  first_pool_size=None,
+                  first_pool_stride=None,
+                  block_sizes=[num_blocks, ]*3,
+                  block_strides=[1, 2, 3],
+                  final_size=64,
+                  resnet_version=RESNET_VERSION,
+                  data_format=DATA_FORMAT,
+                  dtype=tf.float32)
+    logits = model(inputs, training=is_training_bn)
     return logits
 
 
@@ -151,6 +149,8 @@ def main(params):
         tf.gfile.DeleteRecursively(log_dir)
     tf.gfile.MakeDirs(log_dir)
 
+    tf.set_random_seed(seed=42)
+
     print("... creating a TensorFlow session ...\n")
     config = tf.ConfigProto()
     config.allow_soft_placement = True
@@ -165,12 +165,12 @@ def main(params):
     x_train, x_val, y_train, y_val = train_test_split(x_train, y_train,
                                                       test_size=0.2,
                                                       shuffle=True,
-                                                      stratify=y_train)
-    # minimal preprocessing
+                                                      stratify=y_train,
+                                                      random_state=51)
+    # cast samples and labels
     x_train = x_train.astype(np.float32)
     x_val = x_val.astype(np.float32)
     x_test = x_test.astype(np.float32)
-
     y_train = y_train.astype(np.int32)
     y_val = y_val.astype(np.int32)
     y_test = y_test.astype(np.int32)
@@ -179,7 +179,7 @@ def main(params):
     print("\tVAL - images {} | {}  - labels {} - {}".format(x_val.shape, x_val.dtype, y_val.shape, y_val.dtype))
     print("\tTEST - images {} | {}  - labels {} - {}\n".format(x_test.shape, x_test.dtype, y_test.shape, y_test.dtype))
 
-    print('... creating TensorFlow datasets ...')
+    print('... creating TensorFlow datasets ...\n')
     batch_x, batch_y, handle, handle_train, handle_val, handle_test \
         = build_dataset(sess, x_train, x_val, x_test, y_train, y_val, y_test,
                         batch_size=params.batch_size,
@@ -188,41 +188,25 @@ def main(params):
     nb_batches_per_epoch_train = int(ceil(x_train.shape[0]/params.batch_size))
     nb_batches_per_epoch_val = int(ceil(x_val.shape[0]/params.batch_size))
     nb_batches_per_epoch_test = int(ceil(x_test.shape[0]/params.batch_size))
+    print('\tnb_batches_per_epoch_train : {}'.format(nb_batches_per_epoch_train))
+    print('\tnb_batches_per_epoch_val : {}'.format(nb_batches_per_epoch_val))
+    print('\tnb_batches_per_epoch_test : {}\n'.format(nb_batches_per_epoch_test))
 
-    print('nb_batches_per_epoch_train : {}'.format(nb_batches_per_epoch_train))
-    print('nb_batches_per_epoch_val : {}'.format(nb_batches_per_epoch_val))
-    print('nb_batches_per_epoch_test : {}\n'.format(nb_batches_per_epoch_test))
-
-    print('... building model ...')
+    print('... building model ...\n')
     with tf.name_scope('INPUTS'):
         learning_rate = tf.placeholder(shape=[], dtype=tf.float32, name='learning_rate')
         is_training_bn = tf.placeholder(shape=[], dtype=tf.bool, name='is_training_bn')
         global_step = tf.train.get_or_create_global_step()
-        use_swa_model = tf.placeholder(shape=[], dtype=tf.bool, name='use_swa_model')
 
-    logits = build_model(batch_x, is_training_bn=is_training_bn, getter=None)
+    logits = build_model(batch_x, is_training_bn=is_training_bn)
+    model_vars = tf.trainable_variables()
 
-    with tf.name_scope('SWA'):
-        swa = StochasticWeightAveraging()
-        swa_op = swa.apply(var_list=tf.trainable_variables())
-
-        def swa_getter(getter, name, *args, **kwargs):
-            var = getter(name, *args, **kwargs)
-            swa_var = swa.average(var)
-            return swa_var if swa_var else var
-
-        logits_swa = build_model(batch_x, is_training_bn=is_training_bn, getter=swa_getter)
-
-    # logits = tf.cond(use_swa_model, lambda: logits_swa, lambda: logits, name='cond_swa')
+    update_ops = tf.group(*tf.get_collection(tf.GraphKeys.UPDATE_OPS))
+    reset_ops = tf.group(*tf.get_collection('RESET_OPS'))
 
     with tf.name_scope('LOSS'):
         loss = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=batch_y))
-        loss_swa = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits_swa, labels=batch_y))
         acc = tf.reduce_mean(tf.cast(tf.equal(batch_y, tf.argmax(logits, axis=1)), dtype=tf.float32))
-        acc_swa = tf.reduce_mean(tf.cast(tf.equal(batch_y, tf.argmax(logits_swa, axis=1)), dtype=tf.float32))
-
-        loss = tf.cond(use_swa_model, lambda: loss_swa, lambda: loss)
-        acc = tf.cond(use_swa_model, lambda: acc_swa, lambda: acc)
 
     with tf.name_scope('OPTIMIZER'):
         if params.opt == "adam":
@@ -238,119 +222,198 @@ def main(params):
         else:
             raise ValueError('Invalid --opt argument : {}'.format(params.opt))
 
-        with tf.control_dependencies(tf.get_collection(tf.GraphKeys.UPDATE_OPS)):
+        grads_and_vars = opt.compute_gradients(loss, var_list=tf.trainable_variables())
 
-            grads_and_vars = opt.compute_gradients(loss, var_list=tf.trainable_variables())
+        if 'W' in params.opt:
+            # when using AdamW or MomentumW
 
-            if 'W' in params.opt:
-                # when using AdamW or MomentumW
-
-                if params.weight_decay_on == "all":
-                    decay_var_list = tf.trainable_variables()
-                elif params.weight_decay_on == "kernels":
-                    decay_var_list =[]
-                    for var in tf.trainable_variables():
-                        if 'kernel' in var.name:
-                            decay_var_list.append(var)
-                else:
-                    raise ValueError('Invalid --weight_decay_on : {}'.format(params.weight_decay_on))
-
-                train_op = opt.apply_gradients(grads_and_vars, global_step=global_step,
-                                               decay_var_list=decay_var_list, name='train_op')
+            if params.weight_decay_on == "all":
+                decay_var_list = tf.trainable_variables()
+            elif params.weight_decay_on == "kernels":
+                decay_var_list = []
+                for var in tf.trainable_variables():
+                    if 'kernel' in var.name:
+                        decay_var_list.append(var)
             else:
-                # without weight decay
-                train_op = opt.apply_gradients(grads_and_vars, global_step=global_step, name='train_op')
+                raise ValueError('Invalid --weight_decay_on : {}'.format(params.weight_decay_on))
+
+        # in case of moving free batch normalization, there is no control dependencies on moving means/variances
+        if 'W' in params.opt:
+            # add decay_var_list argument for decoupled optimizers
+            train_op = opt.apply_gradients(grads_and_vars, global_step=global_step,
+                                           decay_var_list=decay_var_list, name='train_op')
+        else:
+            # without weight decay
+            train_op = opt.apply_gradients(grads_and_vars, global_step=global_step, name='train_op')
+
+    if params.use_swa:
+        with tf.name_scope('SWA'):
+            swa = StochasticWeightAveraging()
+            swa_op = swa.apply(var_list=model_vars)
+
+            # Make backup variables
+            with tf.variable_scope('BackupVariables'):
+                backup_vars = [tf.get_variable(var.op.name, dtype=var.value().dtype, trainable=False,
+                                               initializer=var.initialized_value())
+                               for var in model_vars]
+            # operation to assign SWA weights to model
+            swa_to_weights = tf.group(*(tf.assign(var, swa.average(var).read_value()) for var in model_vars))
+            # operation to store model into backup variables
+            save_weight_backups = tf.group(*(tf.assign(bck, var.read_value()) for var, bck in zip(model_vars, backup_vars)))
+            # operation to get back values from backup variables to model
+            restore_weight_backups = tf.group(*(tf.assign(var, bck.read_value()) for var, bck in zip(model_vars, backup_vars)))
 
     with tf.name_scope('METRICS'):
-
-        summaries_vars = []
-        for grad, var in grads_and_vars:
-            var_name = var.name.split(':')[0]
-            summaries_vars.append(tf.summary.histogram('VAR/{}'.format(var_name), var))
-            summaries_vars.append(tf.summary.histogram('GRAD/{}'.format(var_name), grad))
-
-        vars_swa = {}
-        for var in tf.global_variables():
-            shadow_var = swa.average(var)
-            if shadow_var is not None:
-                vars_swa[shadow_var.name] = shadow_var
-        for var in vars_swa.values():
-            var_name = var.name.split(':')[0]
-            summaries_vars.append(tf.summary.histogram('SHADOW/{}'.format(var_name), var))
-
-        n_models_summary = tf.summary.scalar('n_models', swa.n_models)
-        lr_summary = tf.summary.scalar('lr', learning_rate)
-
         acc_mean, acc_update_op = tf.metrics.mean(acc)
         loss_mean, loss_update_op = tf.metrics.mean(loss)
 
-        acc_summary = tf.summary.scalar('acc_train', acc)
-        loss_summary = tf.summary.scalar('loss_train', loss)
+    # summaries which track loss/acc per batch
+    acc_summary = tf.summary.scalar('TRAIN/acc', acc)
+    loss_summary = tf.summary.scalar('TRAIN/loss', loss)
 
-        acc_mean_summary = tf.summary.scalar('acc_mean', acc_mean)
-        loss_mean_summary = tf.summary.scalar('loss_mean', loss_mean)
+    # summaries which track accumulated loss/acc
+    acc_mean_summary = tf.summary.scalar('MEAN/acc', acc_mean)
+    loss_mean_summary = tf.summary.scalar('MEAN/loss', loss_mean)
 
-        summaries_mean = tf.summary.merge([acc_mean_summary, loss_mean_summary], name='summaries_mean')
-        summaries = tf.summary.merge([acc_summary, loss_summary, n_models_summary, lr_summary]+summaries_vars,
-                                     name='summaries')
+    lr_summary = tf.summary.scalar('lr', learning_rate)
 
+    # summaries to plot at each epoch
+    summaries_mean = tf.summary.merge([acc_mean_summary, loss_mean_summary], name='summaries_mean')
 
+    # summaries to plot regularly
+    summaries = [acc_summary, loss_summary, lr_summary]
+    if params.use_swa:
+        n_models_summary = tf.summary.scalar('n_models', swa.n_models)
+        summaries.append(n_models_summary)
+    summaries = tf.summary.merge(summaries, name='summaries')
 
     with tf.name_scope('INIT_OPS'):
+        # local init_ops contains operations to reset to zero accumulators of 'acc' and 'loss'
+
         global_init_op = tf.global_variables_initializer()
         local_init_op = tf.local_variables_initializer()
 
         sess.run(global_init_op)
         sess.run(local_init_op)
 
-    vars_classic = [var for var in tf.global_variables() if 'StochasticWeightAveraging' not in var.name]
-    best_saver = tf.train.Saver(vars_classic, max_to_keep=1)
-
-    vars_swa = {}
-    for var in tf.global_variables():
-        shadow_var = swa.average(var)
-        if shadow_var is not None:
-            vars_swa[shadow_var.name] = shadow_var
-        else:
-            vars_swa[var.name] = var
-
-    best_saver_swa = tf.train.Saver(list(vars_swa.values()), max_to_keep=1)
+    with tf.name_scope('SAVERS'):
+        best_saver = tf.train.Saver(tf.global_variables(), max_to_keep=1)
+        if params.use_swa:
+            best_saver_swa = tf.train.Saver(tf.global_variables(), max_to_keep=1)
 
     with tf.name_scope('FILE_WRITERS'):
         writer_train = tf.summary.FileWriter(os.path.join(log_dir, 'train'), graph=sess.graph)
         writer_val = tf.summary.FileWriter(os.path.join(log_dir, 'val'))
         writer_test = tf.summary.FileWriter(os.path.join(log_dir, 'test'))
+
         if params.use_swa:
             writer_val_swa = tf.summary.FileWriter(os.path.join(log_dir, 'val_swa'))
             writer_test_swa = tf.summary.FileWriter(os.path.join(log_dir, 'test_swa'))
 
     if params.strategy_lr == "constant":
-
         def get_learning_rate(step, epoch, steps_per_epoch):
             return params.init_lr
-    elif params.strategy_lr == "cyclical":
-
+    elif params.strategy_lr == "swa":
         def get_learning_rate(step, epoch, steps_per_epoch):
             if epoch < params.epochs_before_swa:
                 return params.init_lr
 
-            total_steps_per_cycle = params.cycle_length * steps_per_epoch
-            step = (step - params.epochs_before_swa * steps_per_epoch) % total_steps_per_cycle
-            lr = (params.alpha1_lr - params.alpha2_lr) * (1 - step / total_steps_per_cycle) + params.alpha2_lr
-            return lr
-    elif params.strategy_lr == "cosine":
-
-        def get_learning_rate(step, epoch, steps_per_epoch):
-            if epoch < params.epochs_before_swa:
+            if not params.use_swa:
                 return params.init_lr
-            total_steps_per_cycle = params.cycle_length * steps_per_epoch
-            step = (step - params.epochs_before_swa * steps_per_epoch) % total_steps_per_cycle
-            lr = (params.alpha1_lr - params.alpha2_lr) * np.cos(np.pi*(step/total_steps_per_cycle)) + params.alpha2_lr
-            return lr
+
+            if step > int(0.9 * params.epochs * steps_per_epoch):
+                return params.alpha2_lr
+
+            length_slope = int(0.9 * params.epochs * steps_per_epoch) - params.epochs_before_swa * steps_per_epoch
+            return params.alpha1_lr - ((params.alpha1_lr - params.alpha2_lr) / length_slope) * \
+                                      (step - params.epochs_before_swa * steps_per_epoch)
     else:
         raise ValueError('Invalid --strategy_lr : {}'.format(params.strategy_lr))
 
-    feed_dict_train = {is_training_bn: True, handle: handle_train, use_swa_model: False}
+    def fit_bn_statistics(epoch, swa=False):
+        # re_initialize statistics
+        sess.run(reset_ops)
+
+        feed_dict = {handle: handle_train, is_training_bn: True}
+
+        if swa:
+            desc = 'FIT STATISTICS @ EPOCH {} for SWA'.format(epoch)
+        else:
+            desc = 'FIT STATISTICS @ EPOCH {}'.format(epoch)
+
+        for _ in tqdm(range(nb_batches_per_epoch_train), desc=desc):
+            sess.run([update_ops], feed_dict=feed_dict)
+
+    def inference(epoch, step, best_acc, best_step, best_epoch):
+        fit_bn_statistics(epoch, swa=False)
+
+        sess.run(local_init_op)
+
+        feed_dict = {is_training_bn: False, handle: handle_val}
+
+        for _ in tqdm(range(nb_batches_per_epoch_val), desc='VALIDATION @ EPOCH {}'.format(epoch)):
+            sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
+
+        acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean])
+        writer_val.add_summary(s, global_step=step)
+        writer_val.flush()
+
+        if acc_v > best_acc:
+            color = COLORS['green']
+            best_acc = acc_v
+            best_step = step
+            best_epoch = epoch
+            ckpt_path = os.path.join(log_dir, 'best_model.ckpt')
+            best_saver.save(sess, ckpt_path, global_step=step)
+        else:
+            color = COLORS['red']
+
+        print("VALIDATION @ EPOCH {} | without SWA : {}acc={:.4f}{}  loss={:.5f}".format(epoch,
+                                                                                         color[0], acc_v, color[1],
+                                                                                         loss_v))
+
+        return best_acc, best_step, best_epoch
+
+    def infernce_swa(epoch, step, best_acc_swa, best_step_swa, best_epoch_swa):
+        sess.run(swa_op)
+        sess.run(save_weight_backups)
+        sess.run(swa_to_weights)
+
+        fit_bn_statistics(epoch, swa=True)
+
+        feed_dict = {is_training_bn: False, handle: handle_val}
+
+        # re-initialize local variables
+        sess.run(local_init_op)
+
+        # now perform a validation loop
+        for _ in tqdm(range(nb_batches_per_epoch_val), desc='VALIDATION with SWA @ EPOCH {}'.format(epoch)):
+            sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
+
+        acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean])
+        writer_val_swa.add_summary(s, global_step=step)
+        writer_val_swa.flush()
+
+        if acc_v > best_acc_swa:
+            color = COLORS['green']
+            best_acc_swa = acc_v
+            best_step_swa = step
+            best_epoch_swa = epoch
+            ckpt_path = os.path.join(log_dir, 'best_model_swa.ckpt')
+            best_saver_swa.save(sess, ckpt_path, global_step=step)
+        else:
+            color = COLORS['red']
+
+        print("VALIDATION @ EPOCH {} | with SWA : {}acc={:.4f}{}  loss={:.5f}".format(epoch,
+                                                                                      color[0], acc_v, color[1],
+                                                                                      loss_v))
+
+        # now restore regular weights (and SWA ones, but unchanged) from last_saver
+        sess.run(restore_weight_backups)
+
+        return best_acc_swa, best_step_swa, best_epoch_swa
+
+    feed_dict_train = {is_training_bn: True, handle: handle_train}
 
     best_acc = 0.
     best_step = 0
@@ -359,61 +422,16 @@ def main(params):
     best_acc_swa = 0.
     best_step_swa = 0
     best_epoch_swa = 0
-
     step = -1
 
-    for epoch in range(params.epochs):
+    # inference with trained variables
+    best_acc, best_step, best_epoch = inference(0, 0, best_acc, best_step, best_epoch)
 
-        # validation step before SWA op
+    for epoch in range(1, params.epochs+1):
+        # ####################################### TRAIN 1 EPOCH ######################################################
         # re-initialize local variables
         sess.run(local_init_op)
 
-        feed_dict = {is_training_bn: False, handle: handle_val, use_swa_model: False}
-
-        for _ in tqdm(range(nb_batches_per_epoch_val), desc='VALIDATION @ EPOCH {}'.format(epoch)):
-            sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
-
-        acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean])
-        writer_val.add_summary(s, global_step=step)
-        writer_val.flush()
-        print("VALIDATION @ EPOCH {} | without SWA : acc={:.4f}  loss={:.5f}".format(epoch, acc_v, loss_v))
-
-        if acc_v > best_acc:
-            print("\tNew best model !")
-            best_acc = acc_v
-            best_step = step
-            best_epoch = epoch
-            ckpt_path = os.path.join(log_dir, 'best_model.ckpt')
-            best_saver.save(sess, ckpt_path, global_step=step)
-
-        if epoch >= params.epochs_before_swa and params.use_swa and (epoch-params.epochs_before_swa) % params.cycle_length == 0:
-
-            # apply SWA
-            sess.run(swa_op)
-            feed_dict = {is_training_bn: False, handle: handle_val, use_swa_model: True}
-
-            # re-initialize local variables
-            sess.run(local_init_op)
-            for _ in tqdm(range(nb_batches_per_epoch_val), desc='VALIDATION with SWA @ EPOCH {}'.format(epoch)):
-                sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
-
-            acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean])
-            writer_val_swa.add_summary(s, global_step=step)
-            writer_val_swa.flush()
-            print("VALIDATION @ EPOCH {} | with SWA : acc={:.4f}  loss={:.5f}".format(epoch, acc_v, loss_v))
-
-            if acc_v > best_acc_swa:
-                print("\tNew best model !")
-                best_acc_swa = acc_v
-                best_step_swa = step
-                best_epoch_swa = epoch
-                ckpt_path = os.path.join(log_dir, 'best_model_swa.ckpt')
-                best_saver_swa.save(sess, ckpt_path, global_step=step)
-
-        # re-initialize local variables
-        sess.run(local_init_op)
-
-        # perform 1 epoch on training data
         for _ in tqdm(range(nb_batches_per_epoch_train), desc='TRAIN @ EPOCH {}'.format(epoch)):
             step += 1
 
@@ -426,22 +444,37 @@ def main(params):
             else:
                 sess.run([train_op, acc_update_op, loss_update_op], feed_dict=feed_dict_train)
 
-        acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean], feed_dict=feed_dict)
+        acc_v, loss_v, s = sess.run([acc_mean, loss_mean, summaries_mean])
         writer_train.add_summary(s, global_step=step)
         writer_train.flush()
         print("TRAIN @ EPOCH {} | : acc={:.4f}  loss={:.5f}".format(epoch, acc_v, loss_v))
+        # ############################################################################################################
 
+        # ###################################### INFERENCE ###########################################################
+        # perform inference with trained variables
+        best_acc, best_step, best_epoch = inference(epoch, step, best_acc, best_step, best_epoch)
+
+        # perform inference with SWA variables
+        if epoch >= params.epochs_before_swa \
+                and params.use_swa \
+                and (epoch-params.epochs_before_swa) % params.cycle_length == 0:
+
+            best_acc_swa, best_step_swa, best_epoch_swa = infernce_swa(epoch, step, best_acc_swa,
+                                                                       best_step_swa, best_epoch_swa)
+        # ############################################################################################################
+
+    # Inference on test set with trained weights
     if best_acc > 0.:
 
         print("Load best model without SWA  |  ACC={:.5f} form epoch={}".format(best_acc, best_epoch))
-        model_to_restore = get_best_model(log_dir)
+        model_to_restore = get_best_model(log_dir, model='best_model')
         if model_to_restore is not None:
             best_saver.restore(sess, model_to_restore)
         else:
             print("Impossible to load best model .... ")
 
         sess.run(local_init_op)
-        feed_dict = {is_training_bn: False, handle: handle_test, use_swa_model: False}
+        feed_dict = {is_training_bn: False, handle: handle_test}
         for _ in tqdm(range(nb_batches_per_epoch_test), desc='TEST'):
             sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
 
@@ -450,17 +483,20 @@ def main(params):
         writer_test.flush()
         print("TEST @ EPOCH {} | without SWA : acc={:.4f}  loss={:.5f}".format(best_epoch, acc_v, loss_v))
 
+    # inference on test set with SWA weights
     if best_acc_swa > 0. and params.use_swa:
 
         print("Load best model with SWA  |  ACC={:.5f} form epoch={}".format(best_acc_swa, best_epoch_swa))
-        model_to_restore = get_best_model(log_dir, mode='swa')
+        model_to_restore = get_best_model(log_dir, model='best_model_swa')
         if model_to_restore is not None:
+            # regular weights are already set to SWA weights ... no need to run 'retrieve_swa_weights' op.
+            # and BN statistics are already set correctly
             best_saver_swa.restore(sess, model_to_restore)
         else:
             print("Impossible to load best model .... ")
 
         sess.run(local_init_op)
-        feed_dict = {is_training_bn: False, handle: handle_test, use_swa_model: True}
+        feed_dict = {is_training_bn: False, handle: handle_test}
         for _ in tqdm(range(nb_batches_per_epoch_test), desc='TEST'):
             sess.run([acc_update_op, loss_update_op], feed_dict=feed_dict)
 
@@ -476,13 +512,15 @@ def main(params):
         writer_val_swa.close()
         writer_test_swa.close()
 
+    sess.close()
+
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_dir', dest='log_dir', type=str, default='test')
 
-    parser.add_argument('--epochs', dest='epochs', type=int, default=20)
+    parser.add_argument('--epochs', dest='epochs', type=int, default=100)
     parser.add_argument('--batch_size', dest='batch_size', type=int, default=128)
 
     parser.add_argument('--opt', dest='opt', type=str, default='momentumW') # adam, adamW, momentum, momentumW
@@ -491,13 +529,13 @@ if __name__ == "__main__":
     parser.add_argument('--weight_decay_on', dest='weight_decay_on', type=str, default='all') # all or kernels
 
     parser.add_argument('--use_swa', dest='use_swa', type=int, default=1)
-    parser.add_argument('--epochs_before_swa', dest='epochs_before_swa', type=int, default=10)
-    parser.add_argument('--strategy_lr', dest='strategy_lr', type=str, default='cyclical') # constant, cyclical, cosine
-    parser.add_argument('--cycle_length', dest='cycle_length', type=int, default=4) # in epochs
+    parser.add_argument('--epochs_before_swa', dest='epochs_before_swa', type=int, default=50)
+    parser.add_argument('--strategy_lr', dest='strategy_lr', type=str, default='swa') # constant, swa
+    parser.add_argument('--cycle_length', dest='cycle_length', type=int, default=1) # in epochs
 
-    parser.add_argument('--init_lr', dest='init_lr', type=float, default=0.005)
-    parser.add_argument('--alpha1_lr', dest='alpha1_lr', type=float, default=0.05)
-    parser.add_argument('--alpha2_lr', dest='alpha2_lr', type=float, default=0.0005)
+    parser.add_argument('--init_lr', dest='init_lr', type=float, default=0.01)
+    parser.add_argument('--alpha1_lr', dest='alpha1_lr', type=float, default=0.01)
+    parser.add_argument('--alpha2_lr', dest='alpha2_lr', type=float, default=0.0001)
 
     params = parser.parse_args(sys.argv[1:])
     main(params)

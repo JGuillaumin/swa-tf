@@ -1,6 +1,7 @@
 logs/
 notebooks/
 .idea/
+_to_keep.py
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template

@@ -27,7 +27,9 @@ The key difference of the full preactivation 'v2' variant compared to the
 rather than after.
 """
 import tensorflow as tf
+from moving_free_batch_normalization import moving_free_batch_normalization
 
+_MOVING_FREE_BATCH_NORM = True
 _BATCH_NORM_DECAY = 0.997
 _BATCH_NORM_EPSILON = 1e-5
 DEFAULT_VERSION = 2
@@ -43,6 +45,12 @@ def batch_norm(inputs, training, data_format):
     """Performs a batch normalization using a standard set of parameters."""
     # We set fused=True for a significant performance boost. See
     # https://www.tensorflow.org/performance/performance_guide#common_fused_ops
+    if _MOVING_FREE_BATCH_NORM:
+        return moving_free_batch_normalization(
+            inputs=inputs, axis=1 if data_format == 'channels_first' else 3,
+            epsilon=_BATCH_NORM_EPSILON, center=True,
+            scale=True, training=training, fused=True)
+
     return tf.layers.batch_normalization(
         inputs=inputs, axis=1 if data_format == 'channels_first' else 3,
         momentum=_BATCH_NORM_DECAY, epsilon=_BATCH_NORM_EPSILON, center=True,
