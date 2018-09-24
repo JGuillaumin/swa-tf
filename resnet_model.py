@@ -29,7 +29,9 @@ rather than after.
 import tensorflow as tf
 from moving_free_batch_normalization import moving_free_batch_normalization
 
+# hard-coded : force to use moving free batch normalization
 _MOVING_FREE_BATCH_NORM = True
+
 _BATCH_NORM_DECAY = 0.997
 _BATCH_NORM_EPSILON = 1e-5
 DEFAULT_VERSION = 2
