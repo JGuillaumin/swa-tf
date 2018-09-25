@@ -29,13 +29,14 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
 
     def __init__(self,
                  axis=-1,
+                 momentum=0.99,
                  epsilon=1e-3,
                  center=True,
                  scale=True,
                  beta_initializer='zeros',
                  gamma_initializer='ones',
                  mean_initializer='zeros',
-                 variance_initializer='zeros',
+                 variance_initializer='ones',
                  beta_regularizer=None,
                  gamma_regularizer=None,
                  beta_constraint=None,
@@ -53,6 +54,7 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
         else:
             self.axis = axis
         self.epsilon = epsilon
+        self.momentum = momentum
         self.center = center
         self.scale = scale
         self.beta_initializer = initializers.get(beta_initializer)
@@ -187,6 +189,27 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
                 self._scope.set_partitioner(None)
             else:
                 partitioner = None
+
+            # internal statistics fitted during the training
+            self.moving_mean = self.add_weight(
+                name='moving_mean',
+                shape=param_shape,
+                dtype=param_dtype,
+                initializer=self.mean_initializer,
+                synchronization=variable_scope.VariableSynchronization.ON_READ,
+                trainable=False,
+                aggregation=variable_scope.VariableAggregation.MEAN)
+
+            self.moving_variance = self.add_weight(
+                name='moving_variance',
+                shape=param_shape,
+                dtype=param_dtype,
+                initializer=self.variance_initializer,
+                synchronization=variable_scope.VariableSynchronization.ON_READ,
+                trainable=False,
+                aggregation=variable_scope.VariableAggregation.MEAN)
+
+            # internal statistics fitted during a pre-inference step
             self.mean = self.add_weight(
                 name='mean',
                 shape=param_shape,
@@ -226,7 +249,17 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
                 stat /= n_updates + 1
                 return state_ops.assign(variable, stat, name=scope)
 
-    def _fused_batch_norm(self, inputs, training):
+    def _assign_moving_averages(self, variable, value, momentum):
+
+        with ops.name_scope(None, 'AssignMovingAvg', [variable, value, momentum]) as scope:
+            with ops.colocate_with(variable):
+                decay = ops.convert_to_tensor(1.0 - momentum, name='decay')
+                if decay.dtype != variable.dtype.base_dtype:
+                    decay = math_ops.cast(decay, variable.dtype.base_dtype)
+                update_delta = (variable - math_ops.cast(value, variable.dtype.base_dtype)) * decay
+                return state_ops.assign_sub(variable, update_delta, name=scope)
+
+    def _fused_batch_norm(self, inputs, training, use_moving_statistics):
         """Returns the output of fused batch norm."""
         beta = self.beta if self.center else self._beta_const
         gamma = self.gamma if self.scale else self._gamma_const
@@ -239,19 +272,25 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
                 epsilon=self.epsilon,
                 data_format=self._data_format)
 
+        mean = tf_utils.smart_cond(use_moving_statistics, lambda: self.moving_mean, lambda : self.mean)
+        variance = tf_utils.smart_cond(use_moving_statistics, lambda: self.moving_variance, lambda : self.variance)
+
         def _fused_batch_norm_inference():
             return nn.fused_batch_norm(
                 inputs,
                 gamma,
                 beta,
-                mean=self.mean,
-                variance=self.variance,
+                mean=mean,
+                variance=variance,
                 epsilon=self.epsilon,
                 is_training=False,
                 data_format=self._data_format)
 
-        output, mean, variance = tf_utils.smart_cond(
-            training, _fused_batch_norm_training, _fused_batch_norm_inference)
+        output, mean, variance = tf_utils.smart_cond(training, _fused_batch_norm_training, _fused_batch_norm_inference)
+        # if training == True: meand and variance returned are mean and vriance of the current batch
+        # elif training == False: mean and variance return are (self.mean, self.variance) or
+        #   (self.moving_mean, self.moving_variance) depending of the value of use_moving_statistics
+
         if not self._bessels_correction_test_only:
             # Remove Bessel's correction to be consistent with non-fused batch norm.
             # Note that the variance computed by fused batch norm is
@@ -263,24 +302,43 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
 
         training_value = tf_utils.constant_value(training)
 
+        if training_value is None:
+            momentum = tf_utils.smart_cond(training,
+                                           lambda: self.momentum,
+                                           lambda: 1.0)
+        else:
+            momentum = ops.convert_to_tensor(self.momentum)
+
         if training_value or training_value is None:
+
+            # if training, first create operations which update self.mean and self.variance
             mean_update = self._update_statistics(self.mean, mean, self.n_updates)
             variance_update = self._update_statistics(self.variance, variance, self.n_updates)
             with ops.control_dependencies([mean_update, variance_update]):
                 update_n_updates = state_ops.assign_add(self.n_updates, 1., )
 
+            # add this combination of operatio to a specific collection
+            ops.add_to_collection('UPDATE_BN_OPS', update_n_updates)
+
+            # operations to reset bn statistics
             reset_mean = state_ops.assign(self.mean, array_ops.zeros_like(self.mean))
             reset_variance = state_ops.assign(self.variance, array_ops.zeros_like(self.variance))
             reset_n_updates = state_ops.assign(self.n_updates, 0.)
-            ops.add_to_collection('RESET_OPS', reset_mean)
-            ops.add_to_collection('RESET_OPS', reset_variance)
-            ops.add_to_collection('RESET_OPS', reset_n_updates)
+            ops.add_to_collection('RESET_BN_OPS', reset_mean)
+            ops.add_to_collection('RESET_BN_OPS', reset_variance)
+            ops.add_to_collection('RESET_BN_OPS', reset_n_updates)
 
-            self.add_update(update_n_updates, inputs=True)
+            # update moving averages and add operations to tf.GraphKeys.UPDATE_OPS
+            # these operation must be run when optimizing the network
+            moving_mean_update = self._assign_moving_averages(self.moving_mean, mean, momentum)
+            moving_variance_update = self._assign_moving_averages(self.moving_variance, variance, momentum)
+            self.add_update(moving_mean_update, inputs=True)
+            self.add_update(moving_variance_update, inputs=True)
+
 
         return output
 
-    def call(self, inputs, training=None):
+    def call(self, inputs, training=None, use_moving_statistics=True):
         original_training_value = training
         if training is None:
             training = K.learning_phase()
@@ -300,7 +358,7 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
                 return outputs
 
         if self.fused:
-            outputs = self._fused_batch_norm(inputs, training=training)
+            outputs = self._fused_batch_norm(inputs, training=training, use_moving_statistics=use_moving_statistics)
             if self.virtual_batch_size is not None:
                 # Currently never reaches here since fused_batch_norm does not support
                 # virtual batching
@@ -339,6 +397,8 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
 
         # Determine a boolean value for `training`: could be True, False, or None.
         training_value = tf_utils.constant_value(training)
+        use_moving_statistics_value = tf_utils.constant_value(use_moving_statistics)
+
         if training_value is not False:
             if self.adjustment:
                 adj_scale, adj_bias = self.adjustment(array_ops.shape(inputs))
@@ -354,14 +414,20 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
             # Some of the computations here are not necessary when training==False
             # but not a constant. However, this makes the code simpler.
             keep_dims = self.virtual_batch_size is not None or len(self.axis) > 1
-            mean, variance = nn.moments(inputs, reduction_axes, keep_dims=keep_dims)
 
+            # mean and variance of the current batch
+            mean, variance = nn.moments(inputs, reduction_axes, keep_dims=keep_dims)
+            
             mean = tf_utils.smart_cond(training,
                                        lambda: mean,
-                                       lambda: self.mean)
+                                       lambda: tf_utils.smart_cond(use_moving_statistics,
+                                                                   lambda : self.moving_mean,
+                                                                   lambda : self.mean))
             variance = tf_utils.smart_cond(training,
                                            lambda: variance,
-                                           lambda: self.variance)
+                                           lambda: tf_utils.smart_cond(use_moving_statistics,
+                                                                       lambda : self.moving_variance,
+                                                                       lambda : self.variance))
 
             if self.virtual_batch_size is not None:
                 # This isn't strictly correct since in ghost batch norm, you are
@@ -374,18 +440,41 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
             else:
                 new_mean, new_variance = mean, variance
 
+            if self.renorm:
+                r, d, new_mean, new_variance = self._renorm_correction_and_moments(
+                    new_mean, new_variance, training)
+                # When training, the normalized values (say, x) will be transformed as
+                # x * gamma + beta without renorm, and (x * r + d) * gamma + beta
+                # = x * (r * gamma) + (d * gamma + beta) with renorm.
+                r = _broadcast(array_ops.stop_gradient(r, name='renorm_r'))
+                d = _broadcast(array_ops.stop_gradient(d, name='renorm_d'))
+                scale, offset = _compose_transforms(r, d, scale, offset)
+
             def _do_update(var, value):
                 if in_eager_mode and not self.trainable:
                     return
-
                 return self._assign_moving_average(var, value, self.momentum)
+
+            moving_mean_update = tf_utils.smart_cond(
+                training,
+                lambda: _do_update(self.moving_mean, new_mean),
+                lambda: self.moving_mean)
+            moving_variance_update = tf_utils.smart_cond(
+                training,
+                lambda: _do_update(self.moving_variance, new_variance),
+                lambda: self.moving_variance)
+
+            if not context.executing_eagerly():
+                self.add_update(moving_mean_update, inputs=True)
+                self.add_update(moving_variance_update, inputs=True)
 
             mean_update = self._update_statistics(self.mean, mean, self.n_updates)
             variance_update = self._update_statistics(self.variance, variance, self.n_updates)
 
             with ops.control_dependencies([mean_update, variance_update]):
-                # update n_updates only after updates of mean and variance
+                # update n_updates only after updating self.mean and self.variance
                 update_n_updates = state_ops.assign_add(self.n_updates, 1.)
+                ops.add_to_collection('UPDATE_BN_OPS', update_n_updates)
 
             reset_mean = state_ops.assign(self.mean, array_ops.zeros_like(self.mean))
             reset_variance = state_ops.assign(self.variance, array_ops.zeros_like(self.variance))
@@ -394,11 +483,10 @@ class MovingFreeBatchNormalizationKeras(KerasLayer):
             ops.add_to_collection('RESET_OPS', reset_variance)
             ops.add_to_collection('RESET_OPS', reset_n_updates)
 
-            if not context.executing_eagerly():
-                self.add_update(update_n_updates, inputs=True)
-
         else:
-            mean, variance = self.mean, self.variance
+            # training == False
+            mean = tf_utils.smart_cond(use_moving_statistics, lambda: self.moving_mean, lambda: self.mean)
+            variance = tf_utils.smart_cond(use_moving_statistics, lambda: self.moving_variance, lambda: self.variance)
 
         mean = math_ops.cast(mean, inputs.dtype)
         variance = math_ops.cast(variance, inputs.dtype)
@@ -458,13 +546,14 @@ class MovingFreeBatchNormalization(MovingFreeBatchNormalizationKeras, base.Layer
 
     def __init__(self,
                  axis=-1,
+                 momentum=0.99,
                  epsilon=1e-3,
                  center=True,
                  scale=True,
                  beta_initializer=init_ops.zeros_initializer(),
                  gamma_initializer=init_ops.ones_initializer(),
                  mean_initializer=init_ops.zeros_initializer(),
-                 variance_initializer=init_ops.zeros_initializer(),
+                 variance_initializer=init_ops.ones_initializer(),
                  beta_regularizer=None,
                  gamma_regularizer=None,
                  beta_constraint=None,
@@ -477,6 +566,7 @@ class MovingFreeBatchNormalization(MovingFreeBatchNormalizationKeras, base.Layer
                  **kwargs):
         super(MovingFreeBatchNormalization, self).__init__(
             axis=axis,
+            momentum=momentum,
             epsilon=epsilon,
             center=center,
             scale=scale,
@@ -495,24 +585,28 @@ class MovingFreeBatchNormalization(MovingFreeBatchNormalizationKeras, base.Layer
             name=name,
             **kwargs)
 
-    def call(self, inputs, training=False):
-        return super(MovingFreeBatchNormalization, self).call(inputs, training=training)
+    def call(self, inputs, training=False, use_moving_statistics=True):
+        return super(MovingFreeBatchNormalization, self).call(inputs,
+                                                              training=training,
+                                                              use_moving_statistics=use_moving_statistics)
 
 
 def moving_free_batch_normalization(inputs,
                                     axis=-1,
+                                    momentum=0.99,
                                     epsilon=1e-3,
                                     center=True,
                                     scale=True,
                                     beta_initializer=init_ops.zeros_initializer(),
                                     gamma_initializer=init_ops.ones_initializer(),
                                     mean_initializer=init_ops.zeros_initializer(),
-                                    variance_initializer=init_ops.zeros_initializer(),
+                                    variance_initializer=init_ops.ones_initializer(),
                                     beta_regularizer=None,
                                     gamma_regularizer=None,
                                     beta_constraint=None,
                                     gamma_constraint=None,
                                     training=False,
+                                    use_moving_statistics=True,
                                     trainable=True,
                                     name=None,
                                     reuse=None,
@@ -522,6 +616,7 @@ def moving_free_batch_normalization(inputs,
 
     layer = MovingFreeBatchNormalization(
         axis=axis,
+        momentum=momentum,
         epsilon=epsilon,
         center=center,
         scale=scale,
@@ -540,7 +635,7 @@ def moving_free_batch_normalization(inputs,
         name=name,
         _reuse=reuse,
         _scope=name)
-    return layer.apply(inputs, training=training)
+    return layer.apply(inputs, training=training, use_moving_statistics=use_moving_statistics)
 
 
 # Aliases
