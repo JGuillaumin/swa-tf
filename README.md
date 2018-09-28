@@ -325,6 +325,7 @@ Conclusion:
 
 #### Results of SWA 
 
+py  
 - epochs = 200
 - epochs before SWA = 100
 - start training with constant learning rate = $\alpha_1$ 
