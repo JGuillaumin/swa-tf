@@ -2,6 +2,9 @@ logs/
 notebooks/
 .idea/
 _to_keep.py
+send_code.sh
+send_back_code.sj
+ip_dl_station
 
 # Created by .ignore support plugin (hsz.mobi)
 ### Python template
