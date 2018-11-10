@@ -4,11 +4,48 @@ from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
-from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.training import slot_creator
 
 
 class StochasticWeightAveraging(object):
+    """
+    Stochastic Weight Averaging ensemble method (Izmailov et al.,  https://arxiv.org/abs/1803.05407)
+
+    SWA averages weights during the learning procedure.
+
+    SWA combines the idea of averaging models within the weight space and a specific learning rate scheduling.
+    The goal is to average models from a region around the same local minimum. (you can't average models from different
+    local minimum, it will produce an averaged model placed outside of theses regions). This scheduling aims to go down
+    in one local minimum when SWA starts.
+
+    Evaluations that use averaged parameters require to fit Batch Norm statistics (mean and variance): Moving Free Batch
+    Norm layer (in moving_free_batch_normalization.py) provides an easy way to perform this operation.
+
+    The `apply()` methods adds shadow copies of the trained variables and add ops that averaged the variables in their
+    shadow copies. The `apply()` might be used several times at the end of the training when falling in a local minimum
+    are. The average() and average_name() methods give access to the shadow variables and their names. They are useful
+    when building an evaluation model, or when restoring a model from a checkpoint file. They help use the moving
+    averages in place of the last trained values for evaluations.
+
+    SWA is different from Exponential Moving Average (EMA) method, which perform exponential averages of the trainable
+    weights. Here it's a classic average. To compute the averages when `apply()` is called, `_n_models` stores the
+    actual number of updates.
+
+    To evaluate the model with SWA weights, you can:
+    *   Replace variables used in the model with `assign()` operations.
+    *   Build a model that uses the shadow variables instead of the variables.
+        For this, use the `average()` method which returns the shadow variable
+        for a given variable.
+    *   Build a model normally but load the checkpoint files to evaluate by using
+        the shadow variable names.  For this use the `average_name()` method.  See
+        the `tf.train.Saver` for more
+        information on restoring saved variables.
+
+
+    SWA might be used to all trainable variables involved in the model, so be careful when providing `var_list` in
+    `apply()` method.
+
+    """
 
     def __init__(self, name="StochasticWeightAveraging"):
         self._name = name
