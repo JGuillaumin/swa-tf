@@ -1,4 +1,0 @@
-#IP_DL="192.168.0.18"
-#PORT_DL="22"
-IP_DL="0.tcp.ngrok.io"
-PORT_DL="17240"
