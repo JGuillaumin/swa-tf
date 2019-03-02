@@ -27,7 +27,7 @@ The key difference of the full preactivation 'v2' variant compared to the
 rather than after.
 """
 import tensorflow as tf
-from moving_free_batch_normalization import moving_free_batch_normalization
+from swa_tf import moving_free_batch_normalization
 
 # hard-coded : force to use moving free batch normalization
 _MOVING_FREE_BATCH_NORM = True

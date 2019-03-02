@@ -12,7 +12,6 @@ from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn
 from tensorflow.python.ops import state_ops
-from tensorflow.python.ops import variable_scope
 from tensorflow.python.layers.normalization import BatchNormalization
 from tensorflow.python.ops import gen_control_flow_ops
 

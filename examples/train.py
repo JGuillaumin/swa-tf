@@ -10,8 +10,7 @@ from tqdm import tqdm
 import argparse
 import sys
 
-
-from stochastic_weight_averaging import StochasticWeightAveraging
+from swa_tf import StochasticWeightAveraging
 from resnet_model import Model
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -382,7 +381,7 @@ def main(params):
 
         return best_acc, best_step, best_epoch
 
-    def infernce_swa(epoch, step, best_acc_swa, best_step_swa, best_epoch_swa):
+    def inference_swa(epoch, step, best_acc_swa, best_step_swa, best_epoch_swa):
         sess.run(swa_op)
         sess.run(save_weight_backups)
         sess.run(swa_to_weights)
@@ -474,8 +473,8 @@ def main(params):
                 and (epoch-params.epochs_before_swa) % params.cycle_length == 0:
 
             # weights are replaced and bn statistics are updated within the function
-            best_acc_swa, best_step_swa, best_epoch_swa = infernce_swa(epoch, step, best_acc_swa,
-                                                                       best_step_swa, best_epoch_swa)
+            best_acc_swa, best_step_swa, best_epoch_swa = inference_swa(epoch, step, best_acc_swa,
+                                                                        best_step_swa, best_epoch_swa)
         # ############################################################################################################
 
     # Inference on test set with trained weights

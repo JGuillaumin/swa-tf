@@ -5,6 +5,7 @@ with open("long_description.md", "r") as f:
 
 setuptools.setup(
     name="swa_tf",
+    package_dir={'swa_tf': 'swa_tf'},
     version="0.0.1",
     author="Julien Guillaumin",
     author_email="j-guillaumin@hotmail.fr",
@@ -14,8 +15,7 @@ setuptools.setup(
     url="https://github.com/JGuillaumin/stochastic_weight_averaging_tf",
     packages=setuptools.find_packages(),
     classifiers=["Programming Language :: Python :: 3",
-                 "License :: OSI Approved :: MIT License",
+                 "License :: OSI Approved :: BSD 2-Clause License",
                  "Operating System :: OS Independent"],
-    install_requires=['python_world>=0.0'],
-    dependency_links=['git+https://github.com/ceddlyburge/python_world#egg=python_world-0.0.1',]
+    install_requires=['tensorflow>=1.11'],
 )

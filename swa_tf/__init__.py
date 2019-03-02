@@ -1,2 +1,2 @@
-from .stochastic_weight_averaging import StochasticWeightAveraging, assign_stochastic_average
-from .moving_free_batch_normalization import MovingFreeBatchNormalization, moving_free_batch_normalization
+from .stochastic_weight_averaging import StochasticWeightAveraging
+from .moving_free_batch_normalization import MovingFreeBatchNormalization, moving_free_batch_normalization, moving_free_batch_norm
