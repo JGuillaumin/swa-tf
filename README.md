@@ -7,13 +7,15 @@
     - we will see how to use correctly these two elements.
 
 - as notices in the original paper, when using the weights from SWA algorithm we need to compute batch norm 
-    statistics with theses weights  (instead of moving statistics computed during the training). 
+    statistics with these weights  (instead of moving statistics computed during the training). 
     So I implemented a `MovingFreeBatchNormalization` layer (compatible with `tf.layers.Layer` and 
-    `keras.layers.Layers` objects) where there is no moving statistics (mean and variance) but you have to compute 
-    these values separately on the training set (or a subset). We will see how to use correctly classical batch 
+    `keras.layers.Layers` objects) where there is moving statistics (mean and variance) and also true statistics,
+    which can be computed/estimated separately on the training set (or a subset). We will see how to use correctly classical batch 
     normalization and this variant of batch normalization.
 
-- I also used `tf.data.Dataset` to feed samples from train/val/test subsets to the network. I combined `initializable` 
+In `examples/`, I tried to reproduce some results. I worked with interesting TensorFlow features : 
+
+- I used `tf.data.Dataset` to feed samples from train/val/test subsets to the network. I combined `initializable` 
     and `feedable` iterators.
 
 - To compute easily accuracy and loss across a subset, validation for example, I used `tf.metrics.mean` to accumulate 
@@ -30,9 +32,9 @@
 SWA is new kind of ensembling method. Instead of mixing predictions from the 'prediction' space (like averaging 
 predictions from multiple networks),
 SWA averages different models within the 'weight space'. 
-If you have to models (same network, same sets of trainable parameters), $\theta_t$ and $\theta_{t+T}$, you can average 
+If you have two models (same network, same sets of trainable parameters), $\theta_t$ and $\theta_{t+T}$, you can average 
 these weights. These weights must come from the same optimization trajectory, with $T$ relatively small
-(like 1 or 2 epochs) without important changing in the learning rate during the period $t$.
+(like 1 or 2 epochs) without important changing in the learning rate during the period $T$.
 
 SWA combines the idea of averaging models within the weight space and a specific learning rate scheduling. 
 The goal is to average models from a region around the same local minimum. (you can't average models from different
